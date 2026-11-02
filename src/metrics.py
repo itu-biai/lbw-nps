@@ -4,16 +4,14 @@
 `G_loc` is deliberately **not** the training loss: non-overlapping windows and
 uniform band weights, while the loss uses overlapping windows and the variant B
 band profile. Training on exactly what you report is how a frequency loss
-flatters itself, and the plan asks for this gap on purpose.
+flatters itself, so the two are kept deliberately different.
 
-`R_H` comes from `work/tcbwnps/code/nps.py`, the implementation the lab's other
-NPS numbers already use (see `config.PROTOCOL_AMENDMENTS`).
+`R_H` comes from `nps.py`, the same radial-spectrum implementation used by the
+pooled NPS baselines.
 """
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -72,7 +70,7 @@ def slice_metrics(prediction: torch.Tensor, target: torch.Tensor, valid: torch.T
     tissue, because the two answer different questions and neither is a safe
     default on its own:
 
-    * 64 x 64 is the plan's window and gives the better-conditioned spectrum
+    * 64 x 64 is the main window and gives the better-conditioned spectrum
       (more frequency bins per band), but at that size the test split holds 4
       windows that are 70% bone, so the bone column is unusable;
     * 32 x 32 reaches every tissue (129 bone windows, 1261 lung) at the cost of
@@ -86,8 +84,8 @@ def slice_metrics(prediction: torch.Tensor, target: torch.Tensor, valid: torch.T
     gt_np = target[0, 0].detach().cpu().numpy().astype(np.float64)
     body = (tissue[0].detach().cpu().numpy().max(axis=0) > 0).astype(np.uint8)
 
-    # data_range = 1.0, as the plan specifies and as `evaluate.psnr` already
-    # uses, so these numbers sit on the same scale as every #230 number.
+    # data_range = 1.0, as in `evaluate.psnr`, so validation and test PSNR
+    # are on the same scale.
     row = {
         "psnr": float(peak_signal_noise_ratio(gt_np, pred_np, data_range=1.0)),
         "ssim": float(structural_similarity(gt_np, pred_np, data_range=1.0)),
@@ -117,7 +115,7 @@ def slice_metrics(prediction: torch.Tensor, target: torch.Tensor, valid: torch.T
 
 
 class LpipsAlex:
-    """AlexNet LPIPS, matched to the #230 evaluator (clamp to [0,1], no rescale)."""
+    """AlexNet LPIPS, matched to `evaluate.py` (clamp to [0,1], no rescale)."""
 
     def __init__(self, device: str = "cuda") -> None:
         import lpips as lpips_lib

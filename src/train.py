@@ -20,7 +20,6 @@ from losses import (
     FocalFrequencyLoss,
     PearsonDivergenceLoss,
     GlobalNPSLoss,
-    MetaWeightedTCBWNPS,
     TCBWNPSLoss,
     VGGPerceptualLoss,
 )
@@ -40,12 +39,6 @@ class Config:
     lambda_aux: float = 0.0
     tissue_weights: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
     band_weights: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
-    # The plan's loss is sum_r sum_b w_rb (...)^2 with w_rb free. Building w as
-    # the outer product of `tissue_weights` and `band_weights` makes it rank-1 by
-    # construction, so no tissue can have its own band profile - and the learned
-    # weights show they want different ones (soft flat, lung and bone rising).
-    # Setting `weight_matrix` bypasses the outer product and trains the free form.
-    weight_matrix: list[list[float]] | None = None
     roi_size: int = 32
     n_rois: int = 4
     min_coverage: float = 0.85
@@ -60,29 +53,16 @@ class Config:
     val_every: int = 4
     val_slices: int = 60
     num_workers: int = 3
-    meta_lr: float = 0.05
-    field: str = "image"  # "image" or "residual" (CT-Mamba style noise spectrum)
+    field: str = "image"  # spectra of the image (all reported runs)
     warmup_epochs: int = 0  # epochs of pure L1 before the aux term is switched on
     detrend: int = 0  # 0 = mean subtraction (viz_toolbox), 2 = TG 233 quadratic detrend
     # The NPS terms compare log spectra. That is a modelling choice: set
     # `log_domain=False` for the relative-linear comparator, which is the
     # control that says whether the log form is doing any work.
     log_domain: bool = True
-    # >0 weights each tissue ROI by 1/sigma^gamma of the clean patch, i.e. the
-    # flatter (lower contrast) the region, the more it counts.
-    lowcontrast_gamma: float = 0.0
-    # Weight each tissue ROI by its coverage instead of admitting it outright.
-    # With a soft mask tag (`tsoft`) that coverage is a mean tissue probability,
-    # which is what makes the conditioning continuous across a class boundary.
-    soft_weight: bool = False
-    # Decoder upsampling. "transpose" is the original and the default, so every
-    # earlier run reproduces exactly. "resize" is the checkerboard-free
-    # alternative (see `unet.make_upsample`), run as its own arm because the
-    # NPS term was found to inflate the Nyquist grid by up to 40x.
-    upsample: str = "transpose"
-    # LBW-NPS (ISBI plan): square tapered windows on a fixed grid, one loss term
-    # per window, no tissue labels. `lbw_patch`/`lbw_stride` are the locality
-    # axis of that paper; stride is kept at patch/2 across the ablation.
+    upsample: str = "transpose"  # decoder upsampling used by all reported runs
+    # LBW-NPS: square Hann-tapered windows on a fixed grid, one loss term per
+    # window, no tissue labels. Stride is kept at patch/2 in every experiment.
     lbw_patch: int = 64
     lbw_stride: int = 32
     lbw_min_valid: float = 0.9
@@ -98,62 +78,32 @@ class Config:
 
 def build_aux_loss(cfg: Config, device: str, n_classes: int = 3) -> tuple[nn.Module | None, str]:
     """Return the auxiliary (non L1) loss term and the signature it expects."""
-    weights = cfg.tissue_weights
-    if len(weights) != n_classes:
-        # A partition with a different class count (e.g. the 4-class
-        # fat/muscle/organ/bone arm) reuses a uniform tissue allocation unless
-        # one of matching length was given explicitly.
-        weights = [1.0] * n_classes
+    weights = cfg.tissue_weights if len(cfg.tissue_weights) == n_classes else [1.0] * n_classes
     tw = torch.tensor(weights, dtype=torch.float32)
     bw = torch.tensor(cfg.band_weights, dtype=torch.float32)
-    if cfg.weight_matrix is not None:
-        w = torch.tensor(cfg.weight_matrix, dtype=torch.float32)
-        if w.shape != (len(weights), len(cfg.band_weights)):
-            raise ValueError(f"weight_matrix {tuple(w.shape)} != "
-                             f"({len(weights)}, {len(cfg.band_weights)})")
-    else:
-        w = tw[:, None] * bw[None, :]
+    w = tw[:, None] * bw[None, :]
     v = cfg.variant
     if v == "l1":
         return None, "none"
-    if v == "nps_curve":  # A0, literature global NPS loss (CT-Mamba style)
-        return GlobalNPSLoss(64, sampling="body", n_rois=8, reduction="curve",
-                             detrend=cfg.detrend, log_domain=cfg.log_domain).to(device), "masked"
-    if v == "nps_global_uniform":  # A
+    if v == "nps_global_uniform":  # pooled NPS, uniform bands
         return GlobalNPSLoss(cfg.roi_size, band_weighted=False, sampling="body", n_rois=8,
                              cutoffs=cfg.cutoffs, field=cfg.field, detrend=cfg.detrend,
                              log_domain=cfg.log_domain).to(device), "masked"
-    if v == "nps_global_band":  # B
+    if v == "nps_global_band":  # pooled NPS, weighted bands
         return GlobalNPSLoss(cfg.roi_size, band_weighted=True, band_weights=bw, sampling="body",
                              n_rois=8, cutoffs=cfg.cutoffs, detrend=cfg.detrend,
                              log_domain=cfg.log_domain).to(device), "masked"
-    if v.startswith("nps_tissue") or v.startswith("nps_tcbw"):  # C, D and the meta variants
-        band_weighted = v != "nps_tissue_uniform"
-        mode = "masked" if v == "nps_tcbw_masked" else "roi"
-        field = "residual" if v.endswith("_residual") else cfg.field
-        reduction = "curve" if v.endswith("_curve") else "band"
-        inv = v.endswith("_invscale")
-        base = TCBWNPSLoss(cfg.roi_size, n_classes, weights=w, band_weighted=band_weighted, mode=mode,
+    if v == "nps_tcbw":  # tissue-conditioned ROI pooling
+        return TCBWNPSLoss(cfg.roi_size, n_classes, weights=w, band_weighted=True, mode="roi",
                            n_rois=cfg.n_rois, cutoffs=cfg.cutoffs,
-                           min_coverage=cfg.min_coverage, field=field,
-                           reduction=reduction, detrend=cfg.detrend,
-                           inverse_scale=inv, soft_weight=cfg.soft_weight,
-                           log_domain=cfg.log_domain,
-                           lowcontrast_gamma=cfg.lowcontrast_gamma).to(device)
-        if v.startswith("nps_tcbw_meta"):
-            # A trailing `_curve` selects the whole-curve reduction above and is
-            # not part of the scheme name, so strip it before the lookup.
-            base_v = v[:-len("_curve")] if v.endswith("_curve") else v
-            scheme = {"nps_tcbw_meta_unc": "uncertainty", "nps_tcbw_meta_grad": "gradnorm",
-                      "nps_tcbw_meta_hard": "hard"}[base_v]
-            return MetaWeightedTCBWNPS(base, scheme=scheme).to(device), "masked"
-        return base, "masked"
-    if v.startswith("lbw"):  # Local image-band loss with a reference validity mask
+                           min_coverage=cfg.min_coverage, field=cfg.field,
+                           reduction="band", detrend=cfg.detrend,
+                           log_domain=cfg.log_domain).to(device), "masked"
+    if v == "lbw_nps":  # LBW-NPS: local band powers with a reference validity mask
         from lbw_nps import LBWNPSTrainingLoss
 
-        weights = (1.0, 1.0, 1.0) if v == "lbw_uniform" else tuple(cfg.band_weights)
         return LBWNPSTrainingLoss(patch_size=cfg.lbw_patch, stride=cfg.lbw_stride,
-                                  band_weights=weights,
+                                  band_weights=tuple(cfg.band_weights),
                                   min_valid=cfg.lbw_min_valid).to(device), "masked"
     if v == "ffl":
         return FocalFrequencyLoss().to(device), "pair"
@@ -186,11 +136,6 @@ def run(cfg: Config) -> dict:
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.epochs)
 
-    meta_opt = None
-    is_meta = isinstance(aux, MetaWeightedTCBWNPS)
-    if is_meta and aux.scheme in ("uncertainty", "hard"):
-        meta_opt = torch.optim.Adam([aux.raw], lr=cfg.meta_lr)
-
     from nps import CLASS_SETS
 
     # The reported low/mid/high NPS ratios must be the same measurement for every
@@ -207,12 +152,8 @@ def run(cfg: Config) -> dict:
     for epoch in range(cfg.epochs):
         net.train()
         train_ds.set_epoch(epoch)
-        # CT-Mamba (Li et al., CMIG 2025, Sec. 3.2) holds its NPS term back for
-        # the first 10 epochs "to balance the numerical relationship between the
-        # Deep NPS loss and the L1 loss and ensure training stability". Our own
-        # sweep shows the fidelity cost of the NPS term is a one-off 1.5 dB paid
-        # at lambda = 0.005 and essentially unchanged at 0.02, which is the
-        # signature of an early-training transient rather than a lambda effect.
+        # Auxiliary terms are switched on after an L1-only warm-up
+        # (`warmup_epochs`, 10 in all reported runs), as in CT-Mamba.
         lam_now = 0.0 if epoch < cfg.warmup_epochs else cfg.lambda_aux
         sums = {"l1": 0.0, "aux": 0.0, "total": 0.0}
         for batch in train_dl:
@@ -226,15 +167,8 @@ def run(cfg: Config) -> dict:
                 loss_aux = aux(pred, gt, masks, noisy=noisy) if sig == "masked" else aux(pred, gt)
             loss = loss_l1 + lam_now * loss_aux
             opt.zero_grad(set_to_none=True)
-            if meta_opt is not None:
-                meta_opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
-            if meta_opt is not None:
-                if aux.scheme == "hard":
-                    # Ascent: mass moves to whichever cell is still mismatched.
-                    aux.raw.grad = -aux.raw.grad
-                meta_opt.step()
             sums["l1"] += loss_l1.item()
             sums["aux"] += float(loss_aux)
             sums["total"] += loss.item()
@@ -249,8 +183,6 @@ def run(cfg: Config) -> dict:
                 best = {"val_l1": rec["val_l1"], "epoch": epoch}
                 torch.save({"model": net.state_dict(), "epoch": epoch, "config": asdict(cfg)},
                            out_dir / "best.pt")
-        if is_meta:
-            rec["meta_weights"] = aux.current_weights().cpu().tolist()
         history.append(rec)
         (out_dir / "history.json").write_text(json.dumps(history, indent=2))
         msg = f"[{cfg.run_name}] ep {epoch + 1}/{cfg.epochs} l1 {rec['train_l1']:.5f} aux {rec['train_aux']:.4f}"

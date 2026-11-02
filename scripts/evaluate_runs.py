@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Score any checkpoint with the ISBI metric code and write per-slice rows.
 
-Every Table 1 row goes through this script, reused #230 checkpoints included,
-so no row is scored by a different implementation (plan, Step 1.2).
+Every Table 1 row goes through this script, so no row is scored by a
+different implementation.
 
-    python scripts/evaluate_runs.py --runs W5_L1only_s42 W5_B_globband_s42 --split test
+    python scripts/evaluate_runs.py --runs l1_s42 pooled_weighted_s42 --split test
     python scripts/evaluate_runs.py --runs input --split test     # the LDCT row
 """
 from __future__ import annotations

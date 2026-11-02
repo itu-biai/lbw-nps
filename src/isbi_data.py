@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Split checks and a slice reader over the packed arrays.
 
-The plan sketches a per-file `.npz` loader. The data here is already packed
-into one `.npy` per split and key (that is what every #230 run trained on), so
-this reads the packed arrays instead. Same slices, same order, same split.
+The data are packed into one `.npy` per split and key (the same arrays the
+training loader in `data.py` reads), so evaluation sees the same slices in the
+same order and split.
 """
 from __future__ import annotations
 

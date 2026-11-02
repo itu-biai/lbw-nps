@@ -25,7 +25,6 @@ import torch
 from nps import (
     BAND_NAMES,
     CLASS_NAMES,
-    CLASS_SETS,
     DEFAULT_BAND_CUTOFFS,
     RoiSpec,
     band_gaps,

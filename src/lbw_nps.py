@@ -24,8 +24,8 @@ class LocalBandNPSLoss(nn.Module):
         self.min_valid = min_valid
         w = torch.tensor(band_weights, dtype=torch.float32)
         # Unit mean, so the total NPS mass is the same whatever the band profile
-        # is and one lambda stays comparable across arms. #230 normalises the
-        # same way; without it a band sweep is also a lambda sweep.
+        # is and one lambda stays comparable across arms. The pooled baselines
+        # normalise the same way; without it a band sweep is also a lambda sweep.
         if normalise_weights:
             w = w / w.mean()
         self.register_buffer("band_weights", w)
@@ -45,7 +45,7 @@ class LocalBandNPSLoss(nn.Module):
 
 
 class LBWNPSTrainingLoss(LocalBandNPSLoss):
-    """Adapter so the #230 trainer can call this with its own signature.
+    """Adapter so `train.py` can call this with its common signature.
 
     The trainer hands every auxiliary loss `(pred, gt, masks, noisy=...)`. The
     valid map is derived here rather than in the trainer, so the training loss

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Loss functions for the TC-BW-NPS study.
+"""Comparator NPS losses (pooled and tissue-conditioned) and the other baselines.
 
-Four cells of the Week 5 decomposition share one implementation and differ only
-in the mask set and the weight matrix:
+LBW-NPS itself lives in `lbw_nps.py`. The pooled and tissue-conditioned NPS
+losses share one implementation and differ only in the mask set and the weight
+matrix:
 
 | cell | tissue conditioning | band weighting |
 | ---- | ------------------- | -------------- |
@@ -11,17 +12,17 @@ in the mask set and the weight matrix:
 | C    | yes (3 masks)       | no             |
 | D    | yes                 | yes            |
 
-`A0` is the literature form of the global NPS loss (uniform over every radial
-bin, CT-Mamba / Zhang MLMI) and is kept separate so the paper can report both
-the faithful prior-work baseline and a clean 2x2 factorial.
+In the paper, "pooled NPS, uniform/weighted" are cells A/B (variants
+`nps_global_uniform` / `nps_global_band`) and "tissue-conditioned ROI pooling"
+is cell D (variant `nps_tcbw`).
 
-Region localisation has two implementations, compared in the paper:
+Region localisation has two implementations; the reported runs use `roi`:
 
 - `mode="roi"`   ROIs sampled inside each tissue class, Hann windowed. This is
                  how NPS is defined (TG 233) and it keeps the measurement inside
                  a homogeneous region.
-- `mode="masked"` the whole image multiplied by the binary mask, as sketched in
-                 `paper_plan.md` Week 4. Cheap, but the mask boundary is a step
+- `mode="masked"` the whole image multiplied by the binary mask. Cheap, but
+                 the mask boundary is a step
                  edge whose spectral leakage lands in exactly the high band the
                  loss is supposed to control.
 """
@@ -256,8 +257,7 @@ class TCBWNPSLoss(_NPSLossBase):
 
     `weights` is `[R, 3]`, region major, in `nps.CLASS_NAMES` order. It is
     normalised to unit mean so the total NPS mass is constant across every cell
-    of the ablation and a single `lambda_nps` stays comparable (Week 5 asks for
-    exactly this).
+    of the ablation and a single `lambda_nps` stays comparable.
     """
 
     def __init__(
@@ -311,7 +311,7 @@ class TCBWNPSLoss(_NPSLossBase):
             w = w / w.mean()
         self.register_buffer("weights", w.float())
 
-    # -- masked whole image variant (paper_plan.md Week 4 sketch) -------------
+    # -- masked whole image variant ---------------------------------------------
     def _masked_forward(self, pred, target, masks, noisy=None) -> torch.Tensor:
         pred, target = self._fields(pred, target, noisy)
 
@@ -388,8 +388,8 @@ class TCBWNPSLoss(_NPSLossBase):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Per (region, band) loss terms and their validity, both `[R, 3]`.
 
-        Exposed so the Week 7 meta learners can weight the cells themselves
-        instead of re-deriving the spectrum.
+        Exposed separately so the cells can be inspected without re-deriving
+        the spectrum.
         """
         if self.mode == "masked":
             assert masks is not None, "masked mode needs [B, R, H, W] masks"
@@ -417,79 +417,6 @@ class TCBWNPSLoss(_NPSLossBase):
             # through the weights themselves.
             w = w / cell.detach().clamp(min=1e-6)
         return (cell * w * cell_valid).sum() / (w * cell_valid).sum().clamp(min=1e-6)
-
-
-class MetaWeightedTCBWNPS(nn.Module):
-    """Learn the 3x3 weight matrix instead of hand tuning it (Week 7).
-
-    Three schemes, all over the same `TCBWNPSLoss.cells` output:
-
-    - `uncertainty` — Kendall et al., CVPR 2018, the plan's primary scheme.
-      Each cell gets a learnable log variance `s`, and the objective becomes
-      `sum_rb exp(-s_rb) L_rb + s_rb`. The `+ s` term is what stops the trivial
-      solution of sending every weight to zero.
-    - `gradnorm` — a **simplified** GradNorm (Chen et al., ICML 2018), the
-      plan's fallback. True GradNorm equalises the per-task gradient norms on
-      the shared parameters, which costs one backward pass per cell (nine here).
-      This implementation keeps only GradNorm's relative-inverse-training-rate
-      term, `r_i = (L_i / L_i(0)) / mean_j(...)`, and sets `w_i ∝ r_i^alpha`.
-      It equalises learning *speed* without measuring gradient magnitude, so it
-      must be reported as "GradNorm-style rate weighting", not as GradNorm.
-    - `hard` — plain gradient ascent on the weights (a GDRO / focal style
-      heuristic): mass moves to whichever cell is still mismatched.
-
-    All three keep the total weight mass fixed at `R * B` so that a single
-    `lambda_aux` stays comparable with the hand tuned runs.
-    """
-
-    def __init__(self, base: "TCBWNPSLoss", scheme: str = "uncertainty", alpha: float = 0.5) -> None:
-        super().__init__()
-        self.base = base
-        self.scheme = scheme
-        self.alpha = alpha
-        n = base.n_classes
-        # Band count follows the base loss. It was hard coded to 3, which kept
-        # the learned-weight arms out of the higher band resolutions even though
-        # the three-band reduction is what loses to the full curve.
-        # One cell per band, or a single cell per tissue when the base matches the
-        # whole curve. Deriving this from `cutoffs` alone made the learned-weight
-        # schemes unusable with `reduction="curve"` - the cell that has the
-        # curve's frequency resolution and tissue conditioning at the same time.
-        nb = 1 if base.reduction == "curve" else len(base.cutoffs) + 1
-        self.raw = nn.Parameter(torch.zeros(n, nb))
-        self.register_buffer("running", torch.ones(n, nb))
-        self.register_buffer("initialised", torch.zeros(()))
-
-    def current_weights(self) -> torch.Tensor:
-        if self.scheme == "uncertainty":
-            w = torch.exp(-self.raw)
-        else:
-            w = torch.softmax(self.raw.reshape(-1), dim=0).reshape(self.raw.shape) * self.raw.numel()
-        return w.detach()
-
-    def forward(self, pred, target, masks=None, coords=None, valid=None, noisy=None) -> torch.Tensor:
-        cell, cell_valid = self.base.cells(pred, target, masks, coords, valid, noisy)
-        n = cell_valid.sum().clamp(min=1.0)
-        if self.scheme == "uncertainty":
-            weighted = (torch.exp(-self.raw) * cell + self.raw) * cell_valid
-            return weighted.sum() / n
-        if self.scheme == "gradnorm":
-            # Relative inverse training rate r_i = (L_i / L_i(0)) / mean_j(...),
-            # weights proportional to r_i^alpha (Chen et al., ICML 2018). The
-            # loss at step 0 is the reference, not a running mean, otherwise the
-            # rate collapses onto whichever cell moved last.
-            with torch.no_grad():
-                if not bool(self.initialised):
-                    self.running.copy_(cell.detach().clamp(min=1e-8))
-                    self.initialised.fill_(1)
-                rate = cell.detach().clamp(min=1e-8) / self.running
-                rate = rate / rate[cell_valid > 0].mean().clamp(min=1e-8)
-                new_raw = self.alpha * torch.log(rate.clamp(min=1e-3, max=1e3))
-                self.raw.data = 0.9 * self.raw.data + 0.1 * new_raw
-            w = torch.softmax(self.raw.reshape(-1), 0).reshape(self.raw.shape) * self.raw.numel()
-            return (w * cell * cell_valid).sum() / n
-        w = torch.softmax(self.raw.reshape(-1), 0).reshape(self.raw.shape) * self.raw.numel()
-        return (w * cell * cell_valid).sum() / n
 
 
 _RADIAL_CACHE: dict = {}

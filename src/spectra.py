@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """Patch spectra: the one definition shared by the LBW-NPS loss and G_loc.
 
-The plan (Step 1.1) requires the loss and the metric to use the same band
-definition, so both import this module and nothing re-implements it.
+The loss and the metric use the same band definition, so both import this
+module and nothing re-implements it.
 
-`BAND_EDGES` is expressed as a fraction of Nyquist. The plan leaves it as a
-TODO to be matched to "#230 variant B"; variant B's `cutoffs` are (0.15, 0.35)
-in cycles/pixel and Nyquist is 0.5 cycles/pixel, so the fractions are
-(0.30, 0.70). That is where the numbers below come from - they are not a new
-choice.
+`BAND_EDGES` is expressed as a fraction of Nyquist. The band cut-offs are
+(0.15, 0.35) cycles/pixel, the same as for the pooled NPS baselines, and
+Nyquist is 0.5 cycles/pixel, so the fractions are (0.30, 0.70).
 """
 from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
 
-BAND_EDGES: tuple[float, ...] = (0.0, 0.30, 0.70, 1.0)  # = #230 variant B (0.15, 0.35) cyc/px
+BAND_EDGES: tuple[float, ...] = (0.0, 0.30, 0.70, 1.0)  # = (0.15, 0.35) cycles/pixel
 BAND_NAMES: tuple[str, str, str] = ("low", "mid", "high")
 EPS = 1e-8
 

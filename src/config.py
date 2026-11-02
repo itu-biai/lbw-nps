@@ -20,7 +20,7 @@ class Protocol:
     train_patch: int = 128
     lr: float = 1e-4
     weight_decay: float = 1e-4
-    band_weights: tuple[float, float, float] = (0.5, 1.0, 2.0)   # #230 variant B
+    band_weights: tuple[float, float, float] = (0.5, 1.0, 2.0)   # low, mid, high
     cutoffs: tuple[float, float] = (0.15, 0.35)                  # cycles/pixel
     lbw_patch: int = 64
     lbw_stride: int = 32
