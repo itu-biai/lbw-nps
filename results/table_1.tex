@@ -1,0 +1,19 @@
+\begin{table*}[t]
+\centering
+\caption{Main results at the final checkpoint. Results are reported as means $\pm$ sample standard deviations across the three seed means. LBW-NPS combines the lowest $G_{64}$ and $G_{32}$ and the $R_H$ closest to 1 with near-best PSNR/SSIM and second-lowest LPIPS. Best values are bold; $\dagger$ marks a slice-level difference from LBW-NPS (Holm $p<0.05$ within 18 tests). For $R_H$, the test uses slice errors $|1-R_H|$.}
+\label{tab:main}
+\setlength{\tabcolsep}{3.2pt}
+\begin{tabular}{lcccccc}
+\toprule
+Loss added to $L_1$ & PSNR $\uparrow$ & SSIM $\uparrow$ & LPIPS $\downarrow$ & $R_H\to1$ & $G_{64}\downarrow$ & $G_{32}\downarrow$ \\
+\midrule
+None ($L_1$ only) & $44.35\pm0.34^{\dagger}$ & $0.9626\pm0.0011$ & $0.0585\pm0.0036$ & $0.31\pm0.04^{\dagger}$ & $0.848\pm0.011^{\dagger}$ & $1.004\pm0.033$ \\
+Pooled NPS, uniform & $44.23\pm0.28^{\dagger}$ & $\mathbf{0.9627\pm0.0017}$ & $0.0476\pm0.0042$ & $0.52\pm0.08^{\dagger}$ & $0.579\pm0.007^{\dagger}$ & $0.668\pm0.007$ \\
+Pooled NPS, weighted & $44.17\pm0.23$ & $0.9618\pm0.0016$ & $0.0490\pm0.0037$ & $0.52\pm0.04^{\dagger}$ & $0.559\pm0.013^{\dagger}$ & $0.653\pm0.012$ \\
+FFL & $\mathbf{44.38\pm0.33}^{\dagger}$ & $0.9623\pm0.0016$ & $0.0587\pm0.0028$ & $0.31\pm0.04^{\dagger}$ & $0.849\pm0.015^{\dagger}$ & $1.006\pm0.034$ \\
+VGG & $43.80\pm0.26^{\dagger}$ & $0.9476\pm0.0065$ & $\mathbf{0.0390\pm0.0031}$ & $0.78\pm0.09^{\dagger}$ & $0.551\pm0.032^{\dagger}$ & $0.613\pm0.030$ \\
+Pearson & $44.14\pm0.33^{\dagger}$ & $0.9612\pm0.0018$ & $0.0586\pm0.0027$ & $0.37\pm0.06^{\dagger}$ & $0.780\pm0.033^{\dagger}$ & $0.906\pm0.042$ \\
+\textbf{LBW-NPS} & $44.17\pm0.25$ & $0.9620\pm0.0021$ & $0.0418\pm0.0046$ & $\mathbf{0.84\pm0.08}$ & $\mathbf{0.380\pm0.005}$ & $\mathbf{0.490\pm0.007}$ \\
+\bottomrule
+\end{tabular}
+\end{table*}

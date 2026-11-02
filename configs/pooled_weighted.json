@@ -1,0 +1,49 @@
+{
+  "run_name": "pooled_weighted_s42",
+  "packed_root": "data/packed",
+  "out_root": "outputs",
+  "domain": "full",
+  "noise": "100k",
+  "mask_tag": "ts",
+  "variant": "nps_global_band",
+  "lambda_aux": 0.002,
+  "tissue_weights": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "band_weights": [
+    0.5,
+    1.0,
+    2.0
+  ],
+  "weight_matrix": null,
+  "roi_size": 32,
+  "n_rois": 4,
+  "min_coverage": 0.85,
+  "cutoffs": [
+    0.15,
+    0.35
+  ],
+  "seed": 42,
+  "patch": 128,
+  "batch_size": 16,
+  "iters_per_epoch": 150,
+  "epochs": 40,
+  "lr": 0.0001,
+  "weight_decay": 0.0001,
+  "val_every": 4,
+  "val_slices": 60,
+  "num_workers": 3,
+  "meta_lr": 0.05,
+  "field": "image",
+  "warmup_epochs": 10,
+  "detrend": 0,
+  "log_domain": true,
+  "lowcontrast_gamma": 0.0,
+  "soft_weight": false,
+  "upsample": "transpose",
+  "lbw_patch": 64,
+  "lbw_stride": 32,
+  "lbw_min_valid": 0.9
+}
