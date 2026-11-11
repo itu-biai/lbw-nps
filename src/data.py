@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Datasets over the packed memmaps."""
 
 from __future__ import annotations
@@ -14,7 +13,9 @@ from torch.utils.data import Dataset
 class PackedSlices:
     """Lazy memmap holder shared by the patch and the full slice datasets."""
 
-    def __init__(self, root: Path, split: str, input_key: str, target_key: str, mask_tag: str):
+    def __init__(
+        self, root: Path, split: str, input_key: str, target_key: str, mask_tag: str
+    ) -> None:
         self.root, self.split = Path(root), split
         self.files = json.loads((self.root / f"{split}_files.json").read_text())
         self.noisy = np.load(self.root / f"{split}_{input_key}.npy", mmap_mode="r")
@@ -24,8 +25,8 @@ class PackedSlices:
         self.nrois = np.load(self.root / f"{split}_nrois_{mask_tag}.npy", mmap_mode="r")
         self.n_classes = int(self.masks.shape[1])
         # Soft mask tags store a continuous partition as uint8 with 255 = 1.0;
-        # binary tags need no scaling. The sidecar is written by
-        # `pack_soft_masks.py` and absent for every hard tag.
+        # binary tags need no scaling. The optional `maskinfo_<tag>.json`
+        # sidecar holds that scale and is absent for binary tags.
         info = self.root / f"maskinfo_{mask_tag}.json"
         self.mask_scale = json.loads(info.read_text())["scale"] if info.exists() else 1.0
 
@@ -64,6 +65,7 @@ class PatchDataset(Dataset):
         self.epoch = 0
 
     def set_epoch(self, epoch: int) -> None:
+        """Set the epoch so that crops differ between epochs but stay reproducible."""
         self.epoch = epoch
 
     def __len__(self) -> int:

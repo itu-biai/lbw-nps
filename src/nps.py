@@ -1,14 +1,10 @@
-#!/usr/bin/env python3
-"""NPS math, numpy and torch, numerically matched to the lab's viz_toolbox.
+"""Radial NPS estimation in numpy (evaluation) and torch (training losses).
 
-The reference implementation is `assets/js/nps.js` in `itu-biai/viz_toolbox`
-(`computeNpsCurve`): mean subtraction, separable Hann window, 2D FFT,
-`|F|^2 / n^2`, radial average into `n//2 + 1` bins over `f in [0, 0.5]`
-cycles/pixel with `round(r/df)` binning, and DC forced to zero. The NPS Gap is
-that file's `logRmse`, a root mean square difference of `log1p` curves.
-
-Everything here is written twice, once in numpy for evaluation and once in
-torch for the training loss, and `test_nps.py` asserts the two agree.
+The estimator follows the BIAI Lab viz-toolbox (https://github.com/itu-biai/viz-toolbox):
+mean subtraction, separable Hann window, 2D FFT, `|F|^2 / n^2`, radial average
+into `n//2 + 1` bins over `f in [0, 0.5]` cycles/pixel with `round(r/df)`
+binning, and DC forced to zero. The NPS gap is the root mean square difference
+of `log1p` curves (`logRmse` in viz-toolbox).
 """
 
 from __future__ import annotations
@@ -19,16 +15,13 @@ import numpy as np
 import torch
 
 # Default band cutoffs in cycles/pixel. Low [0, 0.15), Mid [0.15, 0.35),
-# High [0.35, 0.5]. TG 233 reports NPS against a normalised Nyquist axis; the
-# sibling evaluation project sweeps (0.10, 0.30) and (0.15, 0.35) and finds
-# rankings stable, so (0.15, 0.35) is the default here.
+# High [0.35, 0.5].
 DEFAULT_BAND_CUTOFFS: tuple[float, float] = (0.15, 0.35)
 BAND_NAMES: tuple[str, str, str] = ("low", "mid", "high")
 CLASS_NAMES: tuple[str, str, str] = ("lung", "soft", "bone")
 
-# Which classes a mask source carries. `fine` is the partition matched to this
-# cohort (see notes/tissue_partition_study.md): lung is dropped because 60% of
-# slices have none, and "soft" is split into the three tissues it was hiding.
+# Tissue classes carried by each mask source. All reported runs use `ts`
+# (TotalSegmentator); `fine` splits soft tissue into fat, muscle and organ.
 CLASS_SETS: dict[str, tuple[str, ...]] = {
     "ts": ("lung", "soft", "bone"),
     "hu": ("lung", "soft", "bone"),
@@ -47,7 +40,7 @@ def poly_basis(n: int, order: int = 2) -> np.ndarray:
 
     AAPM TG 233 (Samei et al., Med Phys 2019) specifies **second order
     polynomial detrending** of every NPS ROI before the Fourier transform. Mean
-    subtraction alone (order 0, which is what `viz_toolbox` does) leaves any
+    subtraction alone (order 0, as in viz-toolbox) leaves any
     residual shading or anatomical gradient inside the ROI, and that gradient is
     broadband low-frequency energy that lands directly in the Low band.
     """
@@ -75,12 +68,13 @@ def detrend_operator(n: int, order: int = 2) -> np.ndarray:
 
 
 def hann2d(n: int) -> np.ndarray:
+    """Return a separable `n x n` Hann window."""
     w = np.hanning(n)
     return np.outer(w, w)
 
 
 def radial_bins(n: int) -> tuple[np.ndarray, np.ndarray, int]:
-    """Bin index per FFT sample and the frequency axis, viz_toolbox convention."""
+    """Bin index per FFT sample and the frequency axis (viz-toolbox convention)."""
     bins = (n >> 1) + 1
     df = 0.5 / (bins - 1)
     idx = np.arange(n)
@@ -95,9 +89,8 @@ def radial_bins(n: int) -> tuple[np.ndarray, np.ndarray, int]:
 def nps_from_roi(roi: np.ndarray, window: bool = True, detrend: int = 0) -> np.ndarray:
     """1D radially averaged NPS of one square ROI.
 
-    `detrend=0` subtracts the mean (viz_toolbox parity, the default so existing
-    numbers stay reproducible). `detrend=2` is the TG 233 second order
-    polynomial detrend.
+    `detrend=0` subtracts the mean (viz-toolbox parity, the default).
+    `detrend=2` is the AAPM TG-233 second-order polynomial detrend.
     """
     n = roi.shape[0]
     x = roi.astype(np.float64)
@@ -117,11 +110,12 @@ def nps_from_roi(roi: np.ndarray, window: bool = True, detrend: int = 0) -> np.n
 
 
 def nps_freq_axis(n: int) -> np.ndarray:
+    """Frequency axis (cycles/pixel) of the radial NPS of an `n x n` ROI."""
     return radial_bins(n)[1]
 
 
 def nps_gap(nps_a: np.ndarray, nps_b: np.ndarray) -> float:
-    """viz_toolbox `logRmse`: RMS difference of log1p curves."""
+    """NPS gap (viz-toolbox `logRmse`): RMS difference of `log1p` curves."""
     va = np.log1p(np.maximum(0.0, nps_a))
     vb = np.log1p(np.maximum(0.0, nps_b))
     d = va - vb
@@ -132,7 +126,7 @@ def nps_gap(nps_a: np.ndarray, nps_b: np.ndarray) -> float:
 def nps_gap_log(nps_a: np.ndarray, nps_b: np.ndarray, floor: float = 1e-6) -> float:
     """Scale invariant NPS Gap: RMS of the log ratio between two curves.
 
-    The viz_toolbox `logRmse` uses `log1p`, which is linear for arguments far
+    The viz-toolbox `logRmse` uses `log1p`, which is linear for arguments far
     below 1. With `|F|^2 / n^2` normalisation a CT ROI's NPS sits around 1e-4,
     so `log1p` never leaves its linear regime and the metric degenerates into an
     absolute difference dominated by the low frequency bins: the raw low dose
@@ -154,6 +148,7 @@ def nps_gap_log(nps_a: np.ndarray, nps_b: np.ndarray, floor: float = 1e-6) -> fl
 
 
 def band_slices(freq: np.ndarray, cutoffs: tuple[float, float]) -> list[np.ndarray]:
+    """Boolean masks selecting the low, mid and high bands of a frequency axis."""
     lo, hi = cutoffs
     return [
         (freq > 0) & (freq < lo),
@@ -162,7 +157,9 @@ def band_slices(freq: np.ndarray, cutoffs: tuple[float, float]) -> list[np.ndarr
     ]
 
 
-def band_integrals(freq: np.ndarray, nps: np.ndarray, cutoffs=DEFAULT_BAND_CUTOFFS) -> np.ndarray:
+def band_integrals(
+    freq: np.ndarray, nps: np.ndarray, cutoffs: tuple[float, float] = DEFAULT_BAND_CUTOFFS
+) -> np.ndarray:
     """Trapezoidal integral of the NPS curve inside each band."""
     out = []
     for sel in band_slices(freq, cutoffs):
@@ -173,18 +170,26 @@ def band_integrals(freq: np.ndarray, nps: np.ndarray, cutoffs=DEFAULT_BAND_CUTOF
     return np.array(out)
 
 
-def band_ratios(freq, nps_pred, nps_gt, cutoffs=DEFAULT_BAND_CUTOFFS) -> np.ndarray:
+def band_ratios(
+    freq: np.ndarray,
+    nps_pred: np.ndarray,
+    nps_gt: np.ndarray,
+    cutoffs: tuple[float, float] = DEFAULT_BAND_CUTOFFS,
+) -> np.ndarray:
     """Per band NPS ratio pred/gt. 1.0 is a perfect texture match."""
     p = band_integrals(freq, nps_pred, cutoffs)
     g = band_integrals(freq, nps_gt, cutoffs)
     return p / np.maximum(g, 1e-12)
 
 
-def band_gaps(freq, nps_pred, nps_gt, cutoffs=DEFAULT_BAND_CUTOFFS) -> np.ndarray:
+def band_gaps(
+    freq: np.ndarray,
+    nps_pred: np.ndarray,
+    nps_gt: np.ndarray,
+    cutoffs: tuple[float, float] = DEFAULT_BAND_CUTOFFS,
+) -> np.ndarray:
     """Per band NPS Gap (logRmse restricted to the band's bins)."""
-    return np.array(
-        [nps_gap(nps_pred[sel], nps_gt[sel]) for sel in band_slices(freq, cutoffs)]
-    )
+    return np.array([nps_gap(nps_pred[sel], nps_gt[sel]) for sel in band_slices(freq, cutoffs)])
 
 
 # --------------------------------------------------------------------------
@@ -194,6 +199,8 @@ def band_gaps(freq, nps_pred, nps_gt, cutoffs=DEFAULT_BAND_CUTOFFS) -> np.ndarra
 
 @dataclass(frozen=True)
 class RoiSpec:
+    """ROI search settings: size, stride, coverage, maximum count, erosion and homogeneity."""
+
     size: int = 64
     stride: int = 32
     min_coverage: float = 0.9
@@ -203,6 +210,7 @@ class RoiSpec:
 
 
 def _box_sums(x: np.ndarray, s: int, ys: np.ndarray, xs: np.ndarray) -> np.ndarray:
+    """Sum of `x` over every `s x s` box with top-left corner on the `ys x xs` grid."""
     integral = np.zeros((x.shape[0] + 1, x.shape[1] + 1), dtype=np.float64)
     integral[1:, 1:] = np.cumsum(np.cumsum(x.astype(np.float64), axis=0), axis=1)
     yy, xx = np.meshgrid(ys, xs, indexing="ij")
@@ -230,8 +238,7 @@ def find_class_rois(mask: np.ndarray, spec: RoiSpec, image: np.ndarray | None = 
        that contain a vessel or a lesion, which would otherwise put structure
        into a noise measurement.
 
-    Returns an empty array when the class supports none, which routes the loss
-    to its batch level fallback.
+    Returns an empty `[0, 2]` array when no window qualifies.
     """
     h, w = mask.shape
     s, st = spec.size, spec.stride
@@ -299,8 +306,9 @@ class TorchNPS(torch.nn.Module):
         self.size = size
         self.detrend = detrend
         if detrend >= 1:
-            self.register_buffer("detrend_op",
-                                 torch.from_numpy(detrend_operator(size, detrend)).float())
+            self.register_buffer(
+                "detrend_op", torch.from_numpy(detrend_operator(size, detrend)).float()
+            )
         b, freq, bins = radial_bins(size)
         self.n_bins = bins
         flat = torch.from_numpy(b.reshape(-1)).long()
@@ -326,12 +334,12 @@ class TorchNPS(torch.nn.Module):
         nps = sums / self.bin_counts
         return torch.cat([torch.zeros_like(nps[:, :1]), nps[:, 1:]], dim=1)
 
-    def band_energy(self, nps: torch.Tensor, cutoffs=DEFAULT_BAND_CUTOFFS) -> torch.Tensor:
+    def band_energy(
+        self, nps: torch.Tensor, cutoffs: tuple[float, ...] = DEFAULT_BAND_CUTOFFS
+    ) -> torch.Tensor:
         """`[N, n_bins]` -> `[N, len(cutoffs)+1]` mean NPS inside each band.
 
-        Any number of cutoffs is allowed. Three bands lose to the full curve on
-        every tissue, so the band count is the axis that interpolates between a
-        band weighted loss and a curve matching one.
+        Any number of cutoffs is allowed; all reported runs use two (three bands).
         """
         f = self.freq
         # Half open [lo, hi), so a bin landing exactly on a cutoff belongs to the

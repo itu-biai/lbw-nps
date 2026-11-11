@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Patch spectra: the one definition shared by the LBW-NPS loss and G_loc.
 
 The loss and the metric use the same band definition, so both import this
@@ -8,6 +7,7 @@ module and nothing re-implements it.
 (0.15, 0.35) cycles/pixel, the same as for the pooled NPS baselines, and
 Nyquist is 0.5 cycles/pixel, so the fractions are (0.30, 0.70).
 """
+
 from __future__ import annotations
 
 import torch
@@ -19,6 +19,7 @@ EPS = 1e-8
 
 
 def hann_2d(size: int, device: torch.device) -> torch.Tensor:
+    """Return a separable, non-periodic `size x size` Hann window."""
     window = torch.hann_window(size, periodic=False, device=device)
     return torch.outer(window, window)
 
@@ -32,7 +33,7 @@ def band_index_map(size: int, edges: tuple[float, ...], device: torch.device) ->
     """
     frequencies = torch.fft.fftfreq(size, device=device)
     fy, fx = torch.meshgrid(frequencies, frequencies, indexing="ij")
-    radius = torch.sqrt(fx ** 2 + fy ** 2) / 0.5
+    radius = torch.sqrt(fx**2 + fy**2) / 0.5
     index = torch.bucketize(radius, torch.tensor(edges[1:-1], device=device), right=True)
     index[(radius == 0) | (radius > edges[-1])] = -1
     return index
@@ -44,7 +45,9 @@ def extract_patches(image: torch.Tensor, size: int, stride: int) -> torch.Tensor
     return patches.transpose(1, 2).reshape(image.shape[0], -1, size, size)
 
 
-def patch_band_energies(patches: torch.Tensor, edges: tuple[float, ...] = BAND_EDGES) -> torch.Tensor:
+def patch_band_energies(
+    patches: torch.Tensor, edges: tuple[float, ...] = BAND_EDGES
+) -> torch.Tensor:
     """`[B,L,P,P]` -> `[B,L,n_bands]` mean power per band.
 
     Mean removal then a Hann taper, normalised by sum(h^2) so the result is a
@@ -55,8 +58,9 @@ def patch_band_energies(patches: torch.Tensor, edges: tuple[float, ...] = BAND_E
     centered = (patches - patches.mean(dim=(-2, -1), keepdim=True)) * window
     power = torch.fft.fft2(centered).abs().pow(2) / window.pow(2).sum()
     index = band_index_map(size, edges, patches.device)
-    return torch.stack([power[..., index == band].mean(dim=-1)
-                        for band in range(len(edges) - 1)], dim=-1)
+    return torch.stack(
+        [power[..., index == band].mean(dim=-1) for band in range(len(edges) - 1)], dim=-1
+    )
 
 
 def patch_fraction(mask: torch.Tensor, size: int, stride: int) -> torch.Tensor:

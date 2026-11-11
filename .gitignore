@@ -8,3 +8,4 @@ outputs/
 *.npy
 *.npz
 .env
+.ruff_cache/

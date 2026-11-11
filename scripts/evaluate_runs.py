@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Score any checkpoint with the ISBI metric code and write per-slice rows.
 
 Every Table 1 row goes through this script, so no row is scored by a
@@ -7,6 +6,7 @@ different implementation.
     python scripts/evaluate_runs.py --runs l1_s42 pooled_weighted_s42 --split test
     python scripts/evaluate_runs.py --runs input --split test     # the LDCT row
 """
+
 from __future__ import annotations
 
 import argparse
@@ -21,22 +21,51 @@ import torch
 SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 
-from config import OUT, PACKED, RUNS, PROTOCOL  # noqa: E402
-from isbi_data import PackedSplit  # noqa: E402
-from metrics import LpipsAlex, slice_metrics, valid_map  # noqa: E402
-from unet import UNet  # noqa: E402
+from config import OUT, PACKED, PROTOCOL, RUNS
+from isbi_data import PackedSplit
+from metrics import LpipsAlex, slice_metrics, valid_map
+from unet import UNet
 
-_BASE = ["configuration", "seed", "slice_id", "patient_id", "psnr", "ssim", "lpips",
-         "r_h", "r_h_error"]
-_DUAL = [f"{k}_w{w}" for w in (64, 32)
-         for k in ("gloc", "patches", "gloc_lung", "patches_lung", "gloc_soft",
-                   "patches_soft", "gloc_bone", "patches_bone")]
-_ALIAS = ["local_nps_gap", "patches_valid", "local_nps_gap_lung", "patches_lung",
-          "local_nps_gap_soft", "patches_soft", "local_nps_gap_bone", "patches_bone"]
+_BASE = [
+    "configuration",
+    "seed",
+    "slice_id",
+    "patient_id",
+    "psnr",
+    "ssim",
+    "lpips",
+    "r_h",
+    "r_h_error",
+]
+_DUAL = [
+    f"{k}_w{w}"
+    for w in (64, 32)
+    for k in (
+        "gloc",
+        "patches",
+        "gloc_lung",
+        "patches_lung",
+        "gloc_soft",
+        "patches_soft",
+        "gloc_bone",
+        "patches_bone",
+    )
+]
+_ALIAS = [
+    "local_nps_gap",
+    "patches_valid",
+    "local_nps_gap_lung",
+    "patches_lung",
+    "local_nps_gap_soft",
+    "patches_soft",
+    "local_nps_gap_bone",
+    "patches_bone",
+]
 FIELDS = _BASE + _DUAL + _ALIAS
 
 
 def load_net(run_dir: Path, device: str) -> tuple[torch.nn.Module, dict]:
+    """Load the final checkpoint and saved config of a training run."""
     cfg = json.loads((run_dir / "config.json").read_text())
     state = torch.load(run_dir / "last.pt", map_location=device, weights_only=False)
     net = UNet(upsample=cfg.get("upsample", "transpose")).to(device)
@@ -45,15 +74,21 @@ def load_net(run_dir: Path, device: str) -> tuple[torch.nn.Module, dict]:
 
 
 @torch.no_grad()
-def score(run: str, split: str, device: str, lpips_fn, limit: int | None) -> list[dict]:
+def score(run: str, split: str, device: str, lpips_fn: LpipsAlex, limit: int | None) -> list[dict]:
+    """Return one metric row per slice for a run (`input` scores the LDCT images)."""
     if run == "input":
-        cfg = {"domain": PROTOCOL.domain, "noise": PROTOCOL.noise,
-               "mask_tag": PROTOCOL.mask_tag, "seed": 0}
+        cfg = {
+            "domain": PROTOCOL.domain,
+            "noise": PROTOCOL.noise,
+            "mask_tag": PROTOCOL.mask_tag,
+            "seed": 0,
+        }
         net = None
     else:
         net, cfg = load_net(RUNS / run, device)
-    ikey = (f"noisy_full_{cfg['noise']}" if cfg["domain"] == "full"
-            else f"noisy_clipped_{cfg['noise']}")
+    ikey = (
+        f"noisy_full_{cfg['noise']}" if cfg["domain"] == "full" else f"noisy_clipped_{cfg['noise']}"
+    )
     tkey = "gt_full" if cfg["domain"] == "full" else "gt_clipped"
     data = PackedSplit(PACKED, split, ikey, tkey, cfg.get("mask_tag", "ts"))
     n = len(data) if limit is None else min(limit, len(data))
@@ -61,16 +96,30 @@ def score(run: str, split: str, device: str, lpips_fn, limit: int | None) -> lis
     for i in range(n):
         noisy, gt, masks = data.tensors(i, device)
         pred = noisy if net is None else net(noisy)
-        row = slice_metrics(pred, gt, valid_map(gt, masks.amax(dim=1, keepdim=True)),
-                            masks, lpips_fn=lpips_fn,
-                            min_valid=PROTOCOL.min_valid, min_tissue=PROTOCOL.min_tissue)
+        row = slice_metrics(
+            pred,
+            gt,
+            valid_map(gt, masks.amax(dim=1, keepdim=True)),
+            masks,
+            lpips_fn=lpips_fn,
+            min_valid=PROTOCOL.min_valid,
+            min_tissue=PROTOCOL.min_tissue,
+        )
         stem, patient = data.ids(i)
-        rows.append({"configuration": run, "seed": cfg.get("seed", 0),
-                     "slice_id": stem, "patient_id": patient, **row})
+        rows.append(
+            {
+                "configuration": run,
+                "seed": cfg.get("seed", 0),
+                "slice_id": stem,
+                "patient_id": patient,
+                **row,
+            }
+        )
     return rows
 
 
 def main() -> None:
+    """Score the requested runs and append them to the per-slice CSV."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", nargs="+", required=True)
     ap.add_argument("--split", default="test")
@@ -92,7 +141,7 @@ def main() -> None:
 
     for run in a.runs:
         if run in done:
-            print(f"[atlandi] {run} zaten var", flush=True)
+            print(f"[skip] {run} already scored", flush=True)
             continue
         t0 = time.time()
         new = score(run, a.split, device, lpips_fn, a.limit)
@@ -101,8 +150,10 @@ def main() -> None:
             w = csv.DictWriter(f, fieldnames=FIELDS)
             w.writeheader()
             w.writerows(rows)
-        print(f"[bitti] {run}: {len(new)} kesit, {(time.time() - t0) / 60:.1f} dk -> {out}",
-              flush=True)
+        print(
+            f"[done] {run}: {len(new)} slices, {(time.time() - t0) / 60:.1f} min -> {out}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

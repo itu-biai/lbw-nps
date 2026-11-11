@@ -1,20 +1,17 @@
-#!/usr/bin/env python3
-"""Minimum Reporting Set (MRS) evaluation.
+"""Validation metrics computed during training.
 
-Metric set follows the sibling project `viz_toolbox_and_nps_eval_metric`:
-PSNR, SSIM, global NPS Gap, band NPS ratios (Low/Mid/High), LPIPS, DTS v2, plus
-the per tissue NPS Gap that is native to this paper.
+The metric set is PSNR, SSIM, GMSD, LPIPS, the global NPS gap, band NPS ratios
+(low/mid/high), DTS v2 and the per-tissue NPS gap. The test metrics reported in
+the paper are computed separately by `metrics.py`.
 
-Two NPS measurement scales are reported and they are not interchangeable:
+Two NPS measurement scales are used and they are not interchangeable:
 
-- **global**, on 64x64 ROIs inside the body mask, which is the viz_toolbox
-  default and keeps these numbers comparable with the lab's prior reports;
-- **per tissue**, on 32x32 ROIs inside each class mask. 64x64 was measured
-  first and had to be abandoned: no 64x64 window anywhere in the dataset is
-  85% bone (0 of 220 test slices), because ribs and cortex are thin. At 32x32
-  the bone class is measurable on 23% of slices and, pooled over a batch or a
-  split, gives a stable curve. The cost is frequency resolution: 17 radial bins
-  instead of 33.
+- **global**, on 64x64 ROIs inside the body mask;
+- **per tissue**, on 32x32 ROIs inside each class mask. No 64x64 window in the
+  dataset is 85% bone (0 of 220 test slices), because ribs and cortex are thin.
+  At 32x32 the bone class is measurable on 23% of slices and, pooled over a
+  batch or a split, gives a stable curve, at the cost of frequency resolution
+  (17 radial bins instead of 33).
 """
 
 from __future__ import annotations
@@ -38,18 +35,18 @@ from nps import (
 )
 
 GLOBAL_ROI = RoiSpec(size=64, stride=32, min_coverage=0.95, max_rois=16)
-TISSUE_ROI = RoiSpec(size=32, stride=8, min_coverage=0.85, max_rois=16)
 # AAPM TG 233 specifies a second order polynomial detrend of every NPS ROI.
 # Measured effect on this dataset: the ground truth Low band integral in soft
 # tissue drops 1.7x (2.12e-5 -> 1.23e-5), i.e. 42% of what mean subtraction
 # calls low frequency noise is anatomical shading. Mid and High are unchanged
 # to four significant figures (574.4 -> 574.5, 1608 -> 1610), so this is a
-# correctness fix for the Low band and leaves the paper's headline bands alone.
+# correction of the low band only.
 DETREND = 2
 SOFT_WINDOW_HU = (-175.0, 275.0)
 
 
 def psnr(pred: np.ndarray, gt: np.ndarray, data_range: float = 1.0) -> float:
+    """Peak signal-to-noise ratio in dB."""
     mse = float(np.mean((pred - gt) ** 2))
     return float("inf") if mse == 0 else 10.0 * np.log10(data_range**2 / mse)
 
@@ -67,6 +64,7 @@ def to_soft_window(x: np.ndarray) -> np.ndarray:
 
 
 def ssim(pred: np.ndarray, gt: np.ndarray, data_range: float = 1.0) -> float:
+    """Structural similarity index (scikit-image implementation)."""
     from skimage.metrics import structural_similarity
 
     return float(structural_similarity(gt, pred, data_range=data_range))
@@ -79,7 +77,7 @@ def gmsd(pred: np.ndarray, gt: np.ndarray) -> float:
     kx = np.array([[1, 0, -1], [1, 0, -1], [1, 0, -1]]) / 3.0
     ky = kx.T
 
-    def grad(x):
+    def grad(x: np.ndarray) -> np.ndarray:
         return np.sqrt(convolve(x, kx) ** 2 + convolve(x, ky) ** 2)
 
     gp, gg = grad(pred), grad(gt)
@@ -89,23 +87,30 @@ def gmsd(pred: np.ndarray, gt: np.ndarray) -> float:
 
 
 def global_nps(image: np.ndarray, body: np.ndarray, detrend: int = DETREND) -> np.ndarray | None:
+    """Mean radial NPS over 64x64 body ROIs, or `None` if no ROI fits."""
     rois = find_class_rois(body, GLOBAL_ROI, image=image)
     if len(rois) == 0:
         return None
-    return np.mean([nps_from_roi(image[y : y + 64, x : x + 64], detrend=detrend)
-                    for y, x in rois], axis=0)
+    return np.mean(
+        [nps_from_roi(image[y : y + 64, x : x + 64], detrend=detrend) for y, x in rois], axis=0
+    )
 
 
-def tissue_nps(image: np.ndarray, rois: np.ndarray, n: int, size: int = 32,
-               detrend: int = DETREND) -> np.ndarray | None:
+def tissue_nps(
+    image: np.ndarray, rois: np.ndarray, n: int, size: int = 32, detrend: int = DETREND
+) -> np.ndarray | None:
+    """Mean radial NPS over the first `n` cached tissue ROIs, or `None` if `n` is zero."""
     if n <= 0:
         return None
-    return np.mean([nps_from_roi(image[y : y + size, x : x + size], detrend=detrend)
-                    for y, x in rois[:n]], axis=0)
+    return np.mean(
+        [nps_from_roi(image[y : y + size, x : x + size], detrend=detrend) for y, x in rois[:n]],
+        axis=0,
+    )
 
 
-def roi_sigma_ratio(pred: np.ndarray, gt: np.ndarray, body: np.ndarray,
-                    size: int = 64, detrend: int = DETREND) -> float:
+def roi_sigma_ratio(
+    pred: np.ndarray, gt: np.ndarray, body: np.ndarray, size: int = 64, detrend: int = DETREND
+) -> float:
     """Grain ratio: how much of the reference's noise texture survived.
 
     The direct over-smoothing number. In each flat body ROI the second-order
@@ -142,18 +147,22 @@ def band_score(ratio: float) -> float:
 def dts_v2(ratios: np.ndarray, lpips_value: float) -> float:
     """Equal weighted, band normalised, no PSNR term (so it is not circular).
 
-    Implementation of the DTS v2 spec drafted in the sibling evaluation project:
-    three band ratio scores plus one perceptual score, averaged.
+    Three band-ratio scores plus one perceptual score (1 - LPIPS), averaged.
     """
     comps = [band_score(r) for r in ratios] + [1.0 - float(np.clip(lpips_value, 0, 1))]
     return float(np.mean(comps))
 
 
 class Evaluator:
-    """Per slice MRS over a split, with per tissue NPS on cached ROIs."""
+    """Per-slice validation metrics, with per-tissue NPS on cached ROIs."""
 
-    def __init__(self, cutoffs=DEFAULT_BAND_CUTOFFS, device: str = "cuda", use_lpips: bool = True,
-                 class_names: tuple[str, ...] = CLASS_NAMES):
+    def __init__(
+        self,
+        cutoffs: tuple[float, float] = DEFAULT_BAND_CUTOFFS,
+        device: str = "cuda",
+        use_lpips: bool = True,
+        class_names: tuple[str, ...] = CLASS_NAMES,
+    ) -> None:
         self.cutoffs = cutoffs
         self.class_names = class_names
         self.freq64 = nps_freq_axis(64)
@@ -182,7 +191,8 @@ class Evaluator:
         rois: np.ndarray,
         nrois: np.ndarray,
         windowed_psnr: bool = False,
-    ) -> dict:
+    ) -> dict[str, float]:
+        """Return all metrics of one slice; inputs are 2D arrays in [0, 1] plus cached ROIs."""
         body = (masks.sum(axis=0) > 0).astype(np.uint8)
         out: dict[str, float] = {
             "psnr": psnr(pred, gt),
@@ -221,7 +231,14 @@ class Evaluator:
                 out[f"nps_ratio_log_{name}_{band}"] = float(np.log(max(tr[i], 1e-9)))
         return out
 
-    def curves(self, pred, gt, masks, rois, nrois) -> dict[str, np.ndarray]:
+    def curves(
+        self,
+        pred: np.ndarray,
+        gt: np.ndarray,
+        masks: np.ndarray,
+        rois: np.ndarray,
+        nrois: np.ndarray,
+    ) -> dict[str, np.ndarray]:
         """Raw NPS curves for pooled (ensemble) aggregation.
 
         A band ratio is a ratio of small numbers and its per slice distribution
@@ -244,23 +261,13 @@ class Evaluator:
                 out[f"{name}_pred"], out[f"{name}_gt"] = tp, tg
         return out
 
-    def tissue_curves(
-        self, pred: np.ndarray, gt: np.ndarray, rois: np.ndarray, nrois: np.ndarray
-    ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        curves = {}
-        for c, name in enumerate(self.class_names):
-            n = int(nrois[c])
-            tp, tg = tissue_nps(pred, rois[c], n), tissue_nps(gt, rois[c], n)
-            if tp is not None:
-                curves[name] = (tp, tg)
-        return curves
-
 
 def aggregate(records: list[dict]) -> dict[str, dict[str, float]]:
+    """Mean, standard deviation and count of every finite metric over slices."""
     keys = sorted({k for r in records for k in r})
     out = {}
     for k in keys:
         vals = np.array([r[k] for r in records if k in r and np.isfinite(r[k])])
         if len(vals):
-            out[k] = {"mean": float(vals.mean()), "std": float(vals.std()), "n": int(len(vals))}
+            out[k] = {"mean": float(vals.mean()), "std": float(vals.std()), "n": len(vals)}
     return out

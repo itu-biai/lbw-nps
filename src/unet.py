@@ -1,13 +1,14 @@
-#!/usr/bin/env python3
 """Fixed U-Net backbone. Identical for every loss in the study."""
 
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 class ConvBlock(nn.Module):
+    """Two 3x3 convolutions, each followed by batch normalization and LeakyReLU."""
+
     def __init__(self, cin: int, cout: int) -> None:
         super().__init__()
         self.body = nn.Sequential(
@@ -20,28 +21,18 @@ class ConvBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the block to `x`."""
         return self.body(x)
 
 
 def make_upsample(cin: int, cout: int, kind: str) -> nn.Module:
-    """Decoder upsampling stage.
+    """Return one decoder upsampling stage.
 
-    `transpose` is the original and the default, so every result produced
-    before this option existed is reproduced bit for bit.
-
-    `resize` exists because the NPS term interacts badly with the transposed
-    convolution. Measured over 110 test slices x 3 seeds, the energy at exactly
-    the Nyquist bin — where a stride-2 transposed convolution puts its grid —
-    is 0.011% of ROI power in the normal dose reference and 0.028% with an L1
-    only network, but 0.49% once the NPS term is added and 0.97% with the free
-    weight matrix, reaching 16% on the noisiest slices. The loss asks for high
-    band power and the cheapest way for this decoder to supply it is its own
-    checkerboard, which `sigma_ratio` happily counts as texture.
-
-    Resize-then-convolve removes the artifact at its source (Odena et al.,
-    2016). Parameter count is close but not identical (3x3 conv instead of a
-    2x2 stride-2 kernel), which is why the comparison is run as its own arm
-    rather than substituted silently.
+    `transpose` (a 2x2 stride-2 transposed convolution) is the default and is
+    used by every reported run. `resize` (bilinear upsampling followed by a 3x3
+    convolution, Odena et al., 2016) is an optional checkerboard-free
+    alternative; its parameter count differs slightly, so it is not a drop-in
+    replacement for the reported models.
     """
     if kind == "transpose":
         return nn.ConvTranspose2d(cin, cout, 2, stride=2)
@@ -50,7 +41,7 @@ def make_upsample(cin: int, cout: int, kind: str) -> nn.Module:
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
             nn.Conv2d(cin, cout, 3, padding=1),
         )
-    raise ValueError(f"bilinmeyen upsample: {kind!r}")
+    raise ValueError(f"unknown upsample kind: {kind!r}")
 
 
 class UNet(nn.Module):
@@ -62,8 +53,9 @@ class UNet(nn.Module):
     terms are not fighting a DC drift.
     """
 
-    def __init__(self, base: int = 32, depth: int = 4, in_ch: int = 1,
-                 upsample: str = "transpose") -> None:
+    def __init__(
+        self, base: int = 32, depth: int = 4, in_ch: int = 1, upsample: str = "transpose"
+    ) -> None:
         super().__init__()
         chans = [base * 2**i for i in range(depth + 1)]
         self.down = nn.ModuleList()
@@ -81,6 +73,7 @@ class UNet(nn.Module):
         self.pool = nn.MaxPool2d(2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the denoised image `x - f(x)` for an input of shape `[B, 1, H, W]`."""
         skips = []
         h = x
         for block in self.down:
@@ -95,6 +88,7 @@ class UNet(nn.Module):
 
 
 def count_params(model: nn.Module) -> int:
+    """Return the number of parameters of `model`."""
     return sum(p.numel() for p in model.parameters())
 
 
@@ -123,8 +117,10 @@ if __name__ == "__main__":
             dt = (time.time() - t) / 5
             px = shape[0] * shape[2] * shape[3]
             mem = torch.cuda.max_memory_allocated() / 2**20
-            print(f"{str(shape):22s} {dt * 1000:7.1f} ms/iter  {px / dt / 1e6:6.2f} Mpx/s  peak {mem:.0f} MiB")
+            print(
+                f"{shape!s:22s} {dt * 1000:7.1f} ms/iter  {px / dt / 1e6:6.2f} Mpx/s  peak {mem:.0f} MiB"
+            )
             torch.cuda.reset_peak_memory_stats()
         except RuntimeError as exc:
-            print(f"{str(shape):22s} FAILED: {str(exc)[:80]}")
+            print(f"{shape!s:22s} FAILED: {str(exc)[:80]}")
             torch.cuda.empty_cache()

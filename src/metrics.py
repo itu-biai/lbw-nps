@@ -1,14 +1,14 @@
-#!/usr/bin/env python3
-"""The metrics every ISBI row is scored with - one implementation, all rows.
+"""Test metrics: one implementation used for every row of the result tables.
 
 `G_loc` is deliberately **not** the training loss: non-overlapping windows and
-uniform band weights, while the loss uses overlapping windows and the variant B
-band profile. Training on exactly what you report is how a frequency loss
+uniform band weights, while the loss uses overlapping windows and the
+(0.5, 1, 2) band weights. Training on exactly what you report is how a frequency loss
 flatters itself, so the two are kept deliberately different.
 
 `R_H` comes from `nps.py`, the same radial-spectrum implementation used by the
 pooled NPS baselines.
 """
+
 from __future__ import annotations
 
 import math
@@ -17,15 +17,20 @@ import numpy as np
 import torch
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
-
-from spectra import BAND_EDGES, EPS, extract_patches, patch_band_energies, patch_fraction  # noqa: E402
-from nps import (  # noqa: E402
+from nps import (
     DEFAULT_BAND_CUTOFFS,
     RoiSpec,
     band_ratios,
     find_class_rois,
     nps_freq_axis,
     nps_from_rois,
+)
+from spectra import (
+    BAND_EDGES,
+    EPS,
+    extract_patches,
+    patch_band_energies,
+    patch_fraction,
 )
 
 CLASS_NAMES: tuple[str, ...] = ("lung", "soft", "bone")
@@ -41,6 +46,7 @@ def local_nps_gaps(prediction: torch.Tensor, target: torch.Tensor, size: int = 6
 
 
 def valid_map(target: torch.Tensor, body: torch.Tensor) -> torch.Tensor:
+    """Return the validity map: body pixels whose reference value is not clipped."""
     unclipped = ((target > CLIP_MARGIN) & (target < 1.0 - CLIP_MARGIN)).float()
     return body.float() * unclipped
 
@@ -54,16 +60,24 @@ def _r_high(pred: np.ndarray, gt: np.ndarray, body: np.ndarray) -> float:
     np_gt = nps_from_rois(gt, rois, GLOBAL_ROI.size)
     if np_pred is None or np_gt is None:
         return float("nan")
-    return float(band_ratios(nps_freq_axis(GLOBAL_ROI.size), np_pred, np_gt,
-                             DEFAULT_BAND_CUTOFFS)[2])
+    return float(
+        band_ratios(nps_freq_axis(GLOBAL_ROI.size), np_pred, np_gt, DEFAULT_BAND_CUTOFFS)[2]
+    )
 
 
 WINDOWS: tuple[int, ...] = (64, 32)
 
 
-def slice_metrics(prediction: torch.Tensor, target: torch.Tensor, valid: torch.Tensor,
-                  tissue: torch.Tensor, lpips_fn=None, windows: tuple[int, ...] = WINDOWS,
-                  min_valid: float = 0.9, min_tissue: float = 0.7) -> dict:
+def slice_metrics(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    valid: torch.Tensor,
+    tissue: torch.Tensor,
+    lpips_fn: LpipsAlex | None = None,
+    windows: tuple[int, ...] = WINDOWS,
+    min_valid: float = 0.9,
+    min_tissue: float = 0.7,
+) -> dict[str, float]:
     """One row of the per-slice CSV. Tensors are `[1,1,H,W]` / `[1,3,H,W]`.
 
     Every spectral quantity is produced at **both** window sizes, body and per
@@ -125,8 +139,9 @@ class LpipsAlex:
 
     @torch.no_grad()
     def __call__(self, prediction: torch.Tensor, target: torch.Tensor) -> float:
-        # Clamp, do not rescale: identical to `evaluate.Evaluator._lpips`, so the
-        # LPIPS column is comparable with everything the lab has already reported.
+        """Return the LPIPS distance between two `[1, 1, H, W]` images in [0, 1]."""
+        # Clamp, do not rescale: identical to `evaluate.Evaluator._lpips`, so test
+        # and validation LPIPS are computed the same way.
         a = prediction.clamp(0, 1).to(self.device).repeat(1, 3, 1, 1) * 2 - 1
         b = target.clamp(0, 1).to(self.device).repeat(1, 3, 1, 1) * 2 - 1
         return float(self.net(a, b).item())

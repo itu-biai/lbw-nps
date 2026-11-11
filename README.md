@@ -1,7 +1,6 @@
-# lbw_nps
+# lbw-nps
 
 Code for *LBW-NPS: A Local Band-Weighted Noise Power Spectrum Loss for Texture-Preserving Low-Dose CT Denoising* (submitted to IEEE ISBI 2027).
-
 
 Local band-weighted noise power spectrum loss for low-dose CT denoising. The loss compares band powers on overlapping Hann-tapered image patches. The reference body mask determines which windows contribute.
 
@@ -13,7 +12,7 @@ Use Python 3.11 or 3.12 and run these commands from the repository root.
 
 ```sh
 python -m pip install -r requirements.txt
-python -m pytest -q tests
+make ci
 python src/train.py --config configs/lbw_nps.json
 python scripts/evaluate_runs.py --runs lbw_nps_s42 --split test
 ```
@@ -22,7 +21,11 @@ The training command expects lab-prepared arrays in `data/packed/`. For each spl
 
 The main LBW-NPS configuration is taken from the saved seed-42 run, with portable paths. The comparator presets apply the reported variants and loss weights to the common protocol. `configs/` contains the seven main loss settings, tissue-conditioned pooling and the 32- and 128-pixel patch variants. The default seed is 42. For seeds 123 and 456, change both `seed` and the seed suffix of `run_name` in the configuration before training. The published models used 40 epochs with ten epochs of pixel-only warm-up. The evaluation script reads `last.pt`. After training all three seeds for each setting, `python scripts/eval_independent_texture.py` scores homogeneous reference-selected soft-tissue regions. LPIPS and VGG require their corresponding pretrained weights on first use.
 
-`results/` contains the aggregate manuscript tables and paired tests. Table 1 displays the geometric high-band power ratio across slices. Its significance marker refers to the paired test of absolute per-slice ratio error. Source modules, configuration filenames and experiment names use lowercase `snake_case`.
+`results/` contains the aggregate manuscript tables and paired tests. Table 1 displays the geometric high-band power ratio across slices. Its significance marker refers to the paired test of absolute per-slice ratio error.
+
+## Development
+
+`make ci` runs the unit tests, the Ruff format check and the Ruff linter (`make test`, `make format_check`, `make lint`). `make format` applies import sorting and formatting. Ruff settings are in `pyproject.toml`; training settings are dataclasses in `src/config.py` and the JSON presets in `configs/`.
 
 ## Citation
 
@@ -37,3 +40,7 @@ If you use this code, please cite:
   note      = {Under review}
 }
 ```
+
+## License
+
+This work is licensed under the [Creative Commons Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0)](https://creativecommons.org/licenses/by-nc/4.0/). Non-commercial research and educational use is permitted with attribution; commercial use requires prior written permission from the authors. See [LICENSE](LICENSE).

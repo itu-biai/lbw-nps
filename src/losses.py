@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Comparator NPS losses (pooled and tissue-conditioned) and the other baselines.
 
 LBW-NPS itself lives in `lbw_nps.py`. The pooled and tissue-conditioned NPS
@@ -18,20 +17,19 @@ is cell D (variant `nps_tcbw`).
 
 Region localisation has two implementations; the reported runs use `roi`:
 
-- `mode="roi"`   ROIs sampled inside each tissue class, Hann windowed. This is
-                 how NPS is defined (TG 233) and it keeps the measurement inside
-                 a homogeneous region.
-- `mode="masked"` the whole image multiplied by the binary mask. Cheap, but
-                 the mask boundary is a step
-                 edge whose spectral leakage lands in exactly the high band the
-                 loss is supposed to control.
+- `mode="roi"`: ROIs sampled inside each tissue class, Hann windowed. This
+  follows the AAPM TG-233 NPS definition and keeps the measurement inside a
+  homogeneous region.
+- `mode="masked"`: the whole image multiplied by the binary mask. Cheaper, but
+  the mask boundary is a step edge whose spectral leakage lands in the high
+  band the loss is meant to control.
 """
 
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 from nps import DEFAULT_BAND_CUTOFFS, TorchNPS
 
@@ -46,10 +44,9 @@ def _log_sq_diff(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 def _rel_sq_diff(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Linear control for the log form: squared *relative* difference.
 
-    The log form is a modelling choice, not a given, and it has never been
-    tested here. A plain squared difference would be dominated by the low band
-    (which carries decades more power), so the honest linear comparator
-    normalises by the target - same scale invariance, no log.
+    A plain squared difference would be dominated by the low band, which
+    carries decades more power, so the linear comparator normalizes by the
+    target: the same scale invariance without the logarithm.
     """
     t = target.detach()
     return ((pred - t) / (t.abs() + EPS)).pow(2)
@@ -67,7 +64,6 @@ def extract_patches(image: torch.Tensor, coords: torch.Tensor, size: int) -> tor
     gx = gx.clamp(0, w - 1)
     bi = torch.arange(b, device=dev).view(b, 1, 1, 1, 1).expand(b, r, k, size, size)
     return image[:, 0][bi, gy, gx]
-
 
 
 def rois_from_masks(
@@ -88,12 +84,8 @@ def rois_from_masks(
     comes back all-invalid and the loss then routes it to the batch fallback.
 
     With `soft_weight`, the second return is the window's coverage rather than a
-    boolean, so an admitted ROI contributes in proportion to how much of it
-    really is that tissue. Combined with a soft mask (`pack_soft_masks.py`) the
-    coverage is a mean tissue *probability*, and the whole region term becomes
-    continuous in the segmentation rather than stepping across a one-pixel
-    boundary. `_roi_forward` consumes `valid` as a float weight throughout, so
-    nothing downstream has to change.
+    boolean, so an admitted ROI contributes in proportion to how much of it is
+    that tissue. All reported runs use binary validity.
     """
     b, r, h, w = masks.shape
     m = masks.reshape(b * r, 1, h, w).float()
@@ -112,6 +104,8 @@ def rois_from_masks(
 
 
 class _NPSLossBase(nn.Module):
+    """Shared radial-NPS machinery of the pooled and tissue-conditioned losses."""
+
     def __init__(
         self,
         roi_size: int = 64,
@@ -129,19 +123,14 @@ class _NPSLossBase(nn.Module):
         self.log_domain = log_domain
         self.nps = TorchNPS(roi_size, detrend=detrend)
 
-    def _fields(self, pred, target, noisy):
-        """What the spectrum is taken of.
+    def _fields(
+        self, pred: torch.Tensor, target: torch.Tensor, noisy: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the two images whose spectra are compared.
 
-        `image` measures the spectrum of the prediction and the reference inside
-        a homogeneous ROI, the phantom convention and what `viz_toolbox` does.
-
-        `residual` follows CT-Mamba (Li et al., CMIG 2025, Sec. 2.4): form
-        `noise_GT = x - y` and `noise_pred = x - y_hat` and take the spectra of
-        those. The anatomy cancels in the subtraction, so the ROI no longer has
-        to be anatomically flat - only inside the tissue class. The caveat is
-        that `x - y_hat` is the noise the model *removed*, which equals the
-        noise it *left* only if the model is unbiased on the signal, so the two
-        estimators are compared rather than one assumed better.
+        `image` (all reported runs) uses the prediction and the reference.
+        `residual` follows CT-Mamba (Li et al., CMIG 2025) and uses the removed
+        noise `x - y_hat` and the reference noise `x - y` instead.
         """
         if self.field == "residual":
             assert noisy is not None, "residual field needs the low dose input"
@@ -166,26 +155,14 @@ class _NPSLossBase(nn.Module):
 
 
 class GlobalNPSLoss(_NPSLossBase):
-    """Anatomy blind NPS loss: cells A (uniform) and B (band weighted), and A0.
+    """Pooled NPS loss without tissue conditioning: cells A (uniform) and B (band weighted).
 
-    `sampling="center"` takes the central ROI (deterministic, used by the parity
-    test). `sampling="random"` draws `n_rois` ROIs anywhere in the crop.
-    `sampling="body"` draws them from the body mask and is the default for
-    training.
-
-    The body restriction matters in the regenerated `noisy_full` domain: air
-    outside the patient is exactly 0 in the target (air is -1024 HU, the floor
-    of the scale) while the low dose simulation leaves half-wave rectified noise
-    there, so an ROI in air compares a finite spectrum against an identically
-    zero one and contributes a `log(eps)` term with no anatomical meaning.
-
-    Measured on one validation batch: the tissue anchored patch sampler already
-    keeps crops 83% inside the body, so only 8.5% of candidate 32x32 windows are
-    under 10% body. The effect is therefore modest rather than fatal - the loss
-    moves from 4.25 (body) to 3.87 +- 0.15 (random) - but body sampling is
-    still preferred on two counts: it makes the training loss measure the same
-    thing the evaluator measures, and being a deterministic top-k it removes the
-    sampling variance entirely (+- 0.00 vs +- 0.15 across repeats).
+    `sampling="center"` takes the central ROI (deterministic).
+    `sampling="random"` draws `n_rois` ROIs anywhere in the crop.
+    `sampling="body"` (all reported runs) takes the best-covered ROIs inside the
+    body mask. Restricting ROIs to the body avoids windows in air, where the
+    reference is exactly zero and the log-spectrum term has no anatomical
+    meaning; the deterministic top-k selection also removes sampling variance.
     """
 
     def __init__(
@@ -214,7 +191,9 @@ class GlobalNPSLoss(_NPSLossBase):
             w = w / w.mean()
         self.register_buffer("band_weights", w.float())
 
-    def _sample(self, image: torch.Tensor, masks: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+    def _sample(
+        self, image: torch.Tensor, masks: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         b, _, h, w = image.shape
         s = self.roi_size
         if self.sampling == "center":
@@ -224,7 +203,9 @@ class GlobalNPSLoss(_NPSLossBase):
             return c, torch.ones(b, 1, 1, dtype=torch.bool, device=image.device)
         if self.sampling == "body" and masks is not None:
             body = masks.amax(dim=1, keepdim=True)
-            coords, valid = rois_from_masks(body, s, max(1, s // 4), self.body_coverage, self.n_rois)
+            coords, valid = rois_from_masks(
+                body, s, max(1, s // 4), self.body_coverage, self.n_rois
+            )
             if valid.any():
                 return coords, valid
         y = torch.randint(0, h - s + 1, (b, self.n_rois, 1), device=image.device)
@@ -233,9 +214,13 @@ class GlobalNPSLoss(_NPSLossBase):
         return c, torch.ones(b, 1, self.n_rois, dtype=torch.bool, device=image.device)
 
     def forward(
-        self, pred: torch.Tensor, target: torch.Tensor, masks: torch.Tensor | None = None,
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        masks: torch.Tensor | None = None,
         noisy: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Return the band-weighted log-NPS discrepancy of the pooled body ROIs."""
         c, valid = self._sample(pred, masks)
         fp, ft = self._fields(pred, target, noisy)
         rp = extract_patches(fp, c, self.roi_size)
@@ -253,7 +238,7 @@ class GlobalNPSLoss(_NPSLossBase):
 
 
 class TCBWNPSLoss(_NPSLossBase):
-    """Tissue conditional, band weighted NPS loss: cells C (uniform w) and D.
+    """Tissue-conditioned, band-weighted NPS loss: cells C (uniform weights) and D.
 
     `weights` is `[R, 3]`, region major, in `nps.CLASS_NAMES` order. It is
     normalised to unit mean so the total NPS mass is constant across every cell
@@ -283,12 +268,9 @@ class TCBWNPSLoss(_NPSLossBase):
         lowcontrast_gamma: float = 0.0,
     ) -> None:
         super().__init__(roi_size, cutoffs, reduction, field, detrend, log_domain)
-        # Weight each admitted ROI by how flat it is. Low contrast regions are
-        # where over smoothing actually costs a radiologist a lesion, and they
-        # are exactly the windows a coverage-ranked sampler picks last. gamma=0
-        # is the current behaviour; gamma=1 makes an ROI's weight inversely
-        # proportional to its own standard deviation (normalised to unit mean,
-        # so the loss scale and lambda stay comparable).
+        # Optional low-contrast weighting of admitted ROIs (gamma=0 in all
+        # reported runs); gamma=1 makes an ROI's weight inversely proportional
+        # to its own standard deviation, normalized to unit mean.
         self.lowcontrast_gamma = float(lowcontrast_gamma)
         self.erode_px = erode_px
         self.soft_weight = soft_weight
@@ -299,10 +281,7 @@ class TCBWNPSLoss(_NPSLossBase):
         self.roi_stride = roi_stride if roi_stride is not None else max(1, roi_size // 4)
         self.min_coverage = min_coverage
         self.batch_fallback = batch_fallback
-        # Band count follows `cutoffs`. It was hard coded to 3 here, so cell C
-        # (tissue conditioning, uniform over bands) could not be built at any
-        # other resolution - which is exactly the control needed to separate
-        # "more bands" from "weighted bands".
+        # The band count follows `cutoffs` (three bands in all reported runs).
         n_bands = len(cutoffs) + 1
         w = weights if weights is not None else torch.ones(n_classes, n_bands)
         if not band_weighted:
@@ -312,7 +291,13 @@ class TCBWNPSLoss(_NPSLossBase):
         self.register_buffer("weights", w.float())
 
     # -- masked whole image variant ---------------------------------------------
-    def _masked_forward(self, pred, target, masks, noisy=None) -> torch.Tensor:
+    def _masked_forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        masks: torch.Tensor,
+        noisy: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         pred, target = self._fields(pred, target, noisy)
 
         def profile(img: torch.Tensor) -> torch.Tensor:
@@ -329,8 +314,10 @@ class TCBWNPSLoss(_NPSLossBase):
         cp = _radial_mean(pp, b_idx, bins)
         ct = _radial_mean(pt, b_idx, bins)
         sel = [
-            *[((freq > 0) if i == 0 else (freq >= lo)) & (freq < hi)
-              for i, (lo, hi) in enumerate(zip([0.0, *self.cutoffs[:-1]], self.cutoffs))],
+            *[
+                ((freq > 0) if i == 0 else (freq >= lo)) & (freq < hi)
+                for i, (lo, hi) in enumerate(zip([0.0, *self.cutoffs[:-1]], self.cutoffs))
+            ],
             freq >= self.cutoffs[-1],
         ]
         bp = torch.stack([cp[..., s].mean(-1) for s in sel], dim=-1)
@@ -341,7 +328,14 @@ class TCBWNPSLoss(_NPSLossBase):
         return cell, (usable.sum(0) > 0).float().expand_as(cell)
 
     # -- ROI variant ---------------------------------------------------------
-    def _roi_forward(self, pred, target, coords, valid, noisy=None) -> torch.Tensor:
+    def _roi_forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        coords: torch.Tensor,
+        valid: torch.Tensor,
+        noisy: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         fp, ft = self._fields(pred, target, noisy)
         rp = extract_patches(fp, coords, self.roi_size)
         rt = extract_patches(ft, coords, self.roi_size)
@@ -403,12 +397,26 @@ class TCBWNPSLoss(_NPSLossBase):
         if coords is None or valid is None:
             assert masks is not None, "roi mode needs masks or cached ROI coords"
             coords, valid = rois_from_masks(
-                masks, self.roi_size, self.roi_stride, self.min_coverage, self.n_rois,
-                erode_px=self.erode_px, soft_weight=self.soft_weight,
+                masks,
+                self.roi_size,
+                self.roi_stride,
+                self.min_coverage,
+                self.n_rois,
+                erode_px=self.erode_px,
+                soft_weight=self.soft_weight,
             )
         return self._roi_forward(pred, target, coords, valid, noisy)
 
-    def forward(self, pred, target, masks=None, coords=None, valid=None, noisy=None) -> torch.Tensor:
+    def forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        masks: torch.Tensor | None = None,
+        coords: torch.Tensor | None = None,
+        valid: torch.Tensor | None = None,
+        noisy: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return the weighted mean of the valid (region, band) loss terms."""
         cell, cell_valid = self.cells(pred, target, masks, coords, valid, noisy)
         w = self.weights if self.reduction == "band" else self.weights.mean(1, keepdim=True)
         if self.inverse_scale:
@@ -422,7 +430,12 @@ class TCBWNPSLoss(_NPSLossBase):
 _RADIAL_CACHE: dict = {}
 
 
-def _radial_index(h: int, w: int, device) -> tuple[torch.Tensor, torch.Tensor, int]:
+def _radial_index(
+    h: int,
+    w: int,
+    device: torch.device | str,
+) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor, int]:
+    """Return cached radial-bin indices and counts, the frequency axis and the bin count."""
     key = (h, w, str(device))
     if key not in _RADIAL_CACHE:
         import numpy as np
@@ -442,7 +455,10 @@ def _radial_index(h: int, w: int, device) -> tuple[torch.Tensor, torch.Tensor, i
     return (idx, counts), freq, bins
 
 
-def _radial_mean(power: torch.Tensor, b_idx, bins: int) -> torch.Tensor:
+def _radial_mean(
+    power: torch.Tensor, b_idx: tuple[torch.Tensor, torch.Tensor], bins: int
+) -> torch.Tensor:
+    """Radially average 2D power spectra `[..., H, W]` into `[..., bins]` curves."""
     idx, counts = b_idx
     shape = power.shape[:-2]
     flat = power.reshape(-1, power.shape[-2] * power.shape[-1])
@@ -454,13 +470,14 @@ def _radial_mean(power: torch.Tensor, b_idx, bins: int) -> torch.Tensor:
 
 
 class FocalFrequencyLoss(nn.Module):
-    """Jiang et al., ICCV 2021. Baseline for 'is CT specific structure needed?'."""
+    """Focal frequency loss (Jiang et al., ICCV 2021), applied to the full crop."""
 
     def __init__(self, alpha: float = 1.0) -> None:
         super().__init__()
         self.alpha = alpha
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Return the focal-weighted squared distance of the complex spectra."""
         fp = torch.fft.fft2(pred, norm="ortho")
         ft = torch.fft.fft2(target, norm="ortho")
         diff = torch.stack([fp.real - ft.real, fp.imag - ft.imag], dim=-1)
@@ -475,9 +492,7 @@ class PearsonDivergenceLoss(nn.Module):
 
     Matches the intensity distribution of prediction and target with a Pearson
     divergence estimated through a differentiable kernel density estimate, so it
-    preserves texture without adversarial training. Listed in the project's
-    reference index as a required comparison baseline for the
-    "texture-preserving loss" family.
+    preserves texture without adversarial training.
     """
 
     def __init__(self, bins: int = 64, sigma: float = 0.02, eps: float = 1e-6) -> None:
@@ -493,6 +508,7 @@ class PearsonDivergenceLoss(nn.Module):
         return h / h.sum(dim=1, keepdim=True).clamp(min=self.eps)
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Return the Pearson divergence between the soft intensity histograms."""
         p, q = self._hist(pred), self._hist(target).detach()
         return (((p - q) ** 2) / (q + self.eps)).sum(dim=1).mean()
 
@@ -516,4 +532,5 @@ class VGGPerceptualLoss(nn.Module):
         return (x - self.mean) / self.std
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Return the MSE between VGG-19 feature maps of prediction and target."""
         return F.mse_loss(self.vgg(self._prep(pred)), self.vgg(self._prep(target)))

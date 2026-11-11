@@ -1,20 +1,24 @@
-#!/usr/bin/env python3
-"""Step 1.4 sanity checks, plus the Step 1.1 unit tests for the shared spectra."""
+"""Unit tests for the LBW-NPS loss, the shared band spectra and the local NPS metric."""
+
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from lbw_nps import LocalBandNPSLoss  # noqa: E402
-from metrics import local_nps_gaps  # noqa: E402
-from spectra import BAND_EDGES, extract_patches, patch_band_energies  # noqa: E402
+from isbi_data import assert_no_patient_leakage
+from lbw_nps import LocalBandNPSLoss
+from metrics import local_nps_gaps
+from spectra import BAND_EDGES, extract_patches, patch_band_energies
 
 
 def test_zero_at_equality_and_gradient() -> None:
+    """The loss is zero for identical images and has a finite, non-zero gradient otherwise."""
     target = torch.rand(2, 1, 128, 128)
     valid = torch.ones_like(target)
     loss_fn = LocalBandNPSLoss(patch_size=32, stride=16)
@@ -26,6 +30,7 @@ def test_zero_at_equality_and_gradient() -> None:
 
 
 def test_invalid_patches_are_ignored() -> None:
+    """Differences inside patches outside the valid mask do not contribute."""
     target = torch.rand(1, 1, 128, 128)
     prediction = target.clone()
     prediction[..., :64, :] += 0.2 * torch.randn(1, 1, 64, 128)
@@ -63,19 +68,21 @@ def test_global_case_is_one_patch() -> None:
 
 
 def test_band_weights_are_unit_mean() -> None:
+    """Band weights are normalized to unit mean."""
     loss_fn = LocalBandNPSLoss(band_weights=(0.5, 1.0, 2.0))
     assert abs(float(loss_fn.band_weights.mean()) - 1.0) < 1e-6
 
 
-if __name__ == "__main__":
-    fails = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print(f"  PASS  {name}")
-            except AssertionError as exc:
-                fails += 1
-                print(f"  FAIL  {name}: {exc}")
-    print("tum testler gecti" if not fails else f"{fails} test basarisiz")
-    sys.exit(1 if fails else 0)
+def test_patient_leakage_is_detected(tmp_path: Path) -> None:
+    """Disjoint splits pass and a patient shared by two splits is rejected."""
+    splits = {
+        "train": ["000001_01_01_010.png.npz", "000002_01_01_020.png.npz"],
+        "val": ["000003_01_01_030.png.npz"],
+        "test": ["000004_01_01_040.png.npz"],
+    }
+    for split, files in splits.items():
+        (tmp_path / f"{split}_files.json").write_text(json.dumps(files))
+    assert assert_no_patient_leakage(tmp_path) == {"train": 2, "val": 1, "test": 1}
+    (tmp_path / "test_files.json").write_text(json.dumps(["000001_01_01_050.png.npz"]))
+    with pytest.raises(AssertionError):
+        assert_no_patient_leakage(tmp_path)
